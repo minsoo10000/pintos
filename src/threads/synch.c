@@ -67,9 +67,10 @@ sema_down (struct semaphore *sema)
   ASSERT (!intr_context ());
 
   old_level = intr_disable ();
-  while (sema->value == 0) 
+  if (sema->value == 0) 
     {
-      list_push_back (&sema->waiters, &thread_current ()->elem);
+      priority_donation();
+      list_insert_ordered (&sema->waiters, &thread_current ()->elem, Compare_thread, NULL);
       thread_block ();
     }
   sema->value--;
@@ -114,9 +115,10 @@ sema_up (struct semaphore *sema)
   ASSERT (sema != NULL);
 
   old_level = intr_disable ();
-  if (!list_empty (&sema->waiters)) 
-    thread_unblock (list_entry (list_pop_front (&sema->waiters),
-                                struct thread, elem));
+  if (!list_empty (&sema->waiters)){
+    list_sort(&sema->waiters, Compare_thread, NULL);
+    thread_unblock (list_entry (list_pop_front (&sema->waiters), struct thread, elem));
+  }
   sema->value++;
   intr_set_level (old_level);
 }
@@ -196,8 +198,14 @@ lock_acquire (struct lock *lock)
   ASSERT (lock != NULL);
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
-
+  
+  if(lock->holder)
+  {
+    thread_current()->locked = lock;
+    list_insert_ordered(&lock->holder->locks, &thread_current()->lock_elem, Compare_thread, NULL); 
+  }
   sema_down (&lock->semaphore);
+  thread_current()->locked = NULL;
   lock->holder = thread_current ();
 }
 
@@ -234,6 +242,8 @@ lock_release (struct lock *lock)
   ASSERT (lock_held_by_current_thread (lock));
 
   lock->holder = NULL;
+  priority_rollback(lock);
+  priority_refresh();
   sema_up (&lock->semaphore);
 }
 
@@ -319,8 +329,26 @@ cond_signal (struct condition *cond, struct lock *lock UNUSED)
   ASSERT (lock_held_by_current_thread (lock));
 
   if (!list_empty (&cond->waiters)) 
+    list_sort(&cond->waiters, Compare_sema, NULL);
     sema_up (&list_entry (list_pop_front (&cond->waiters),
                           struct semaphore_elem, elem)->semaphore);
+}
+
+bool
+Compare_sema(struct list_elem *listelea, struct list_elem *listeleb, void *aux UNUSED)
+{
+  struct semaphore_elem *Semelea = list_entry(listelea, struct semaphore_elem, elem);
+  struct semaphore_elem *Semeleb = list_entry(listeleb, struct semaphore_elem, elem);
+  if(!(list_empty(&Semelea->semaphore.waiters)&&list_empty(&Semeleb->semaphore.waiters))){
+    list_sort(&Semelea->semaphore.waiters, Compare_thread, NULL);
+    list_sort(&Semeleb->semaphore.waiters, Compare_thread, NULL);
+    struct thread *threada = list_entry(list_front(&Semelea->semaphore.waiters), struct thread, elem);
+    struct thread *threadb = list_entry(list_front(&Semeleb->semaphore.waiters), struct thread, elem);
+    return threada->priority > threadb->priority;
+  }
+  else{
+    return list_empty(&Semelea->semaphore.waiters);
+  }
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by
@@ -338,3 +366,4 @@ cond_broadcast (struct condition *cond, struct lock *lock)
   while (!list_empty (&cond->waiters))
     cond_signal (cond, lock);
 }
+

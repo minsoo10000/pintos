@@ -88,6 +88,11 @@ struct thread
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
+    int priority_before_lock;
+    struct lock *locked;
+    struct list locks;
+    struct list_elem lock_elem;
+    int64_t tick;
 
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
@@ -132,5 +137,13 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+bool Compare_tick (const struct list_elem *, const struct list_elem *, void *);
+bool Compare_thread (const struct list_elem *, const struct list_elem *, void *);
+bool Compare_lock(struct list_elem *, struct list_elem *, void *);
+
+void priority_donation(void);
+void priority_rollback(struct lock *);
+void priority_refresh(void);
 
 #endif /* threads/thread.h */

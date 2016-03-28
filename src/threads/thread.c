@@ -138,8 +138,6 @@ thread_tick (void)
     kernel_ticks++;
 
   /* Enforce preemption. */
-  if (++thread_ticks >= TIME_SLICE)
-    intr_yield_on_return ();
 }
 
 /* Prints thread statistics. */
@@ -239,8 +237,11 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+  list_insert_ordered(&ready_list, &t->elem, Compare_thread, NULL);
   t->status = THREAD_READY;
+  if(!intr_context()&&thread_current() != idle_thread){
+    thread_yield();
+  }
   intr_set_level (old_level);
 }
 
@@ -308,7 +309,7 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (curr != idle_thread) 
-    list_push_back (&ready_list, &curr->elem);
+    list_insert_ordered(&ready_list, &curr->elem, Compare_thread, NULL);
   curr->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -318,7 +319,20 @@ thread_yield (void)
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
+  enum intr_level old_level = intr_disable();
+  struct thread *cur_thread = thread_current ();
+  int old_priority = cur_thread->priority;
+
+  cur_thread->priority_before_lock = new_priority;
+  priority_refresh();
+  if(cur_thread->priority > old_priority)
+  {
+    priority_donation();
+  }
+  else{
+    thread_yield();
+  }
+  intr_set_level(old_level);
 }
 
 /* Returns the current thread's priority. */
@@ -443,6 +457,9 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->priority_before_lock = priority;
+  t->locked = NULL;
+  list_init(&t->locks);
   t->magic = THREAD_MAGIC;
 }
 
@@ -470,6 +487,7 @@ next_thread_to_run (void)
   if (list_empty (&ready_list))
     return idle_thread;
   else
+    list_sort(&ready_list, Compare_thread, NULL);
     return list_entry (list_pop_front (&ready_list), struct thread, elem);
 }
 
@@ -539,6 +557,7 @@ schedule (void)
 
   if (curr != next)
     prev = switch_threads (curr, next);
+
   schedule_tail (prev); 
 }
 
@@ -559,3 +578,81 @@ allocate_tid (void)
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+void
+priority_donation(void)
+{
+  struct thread *thr = thread_current();
+  struct lock *lock = thr->locked;
+  while (lock)
+  {
+    if(lock->holder || lock->holder->priority < thr->priority){
+      lock->holder->priority = thr->priority;
+      thr = lock->holder;
+      lock = thr->locked;
+    }
+    else{
+      break;
+    }
+  }
+}
+
+void
+priority_rollback(struct lock *locked)
+{
+  struct thread* thread_cur = thread_current();
+  struct list_elem *l = list_begin(&thread_cur->locks);
+  struct list_elem *next;
+  while (l != list_end(&thread_cur->locks)){
+    next = list_next(l);
+    struct thread *thr = list_entry(l, struct thread, lock_elem);
+    if (thr->locked == locked){
+      list_remove(l);
+    }
+    l = next;
+  }
+}
+
+void
+priority_refresh(void)
+{
+  struct thread* thread_cur = thread_current();
+  thread_cur->priority = thread_cur->priority_before_lock;
+  if(list_empty(&thread_cur->locks)){
+    return;
+  }
+  else{
+    struct thread *thr = list_entry(list_front(&thread_cur->locks), struct thread, lock_elem);
+    if (thread_cur->priority < thr->priority){
+      thread_cur->priority = thr->priority;
+    }
+  }
+}
+
+bool
+Compare_lock(struct list_elem *elema, struct list_elem *elemb, void *aux UNUSED)
+{
+  struct thread *thra = list_entry(elema, struct thread, elem);
+  struct thread *thrb = list_entry(elemb, struct thread, elem);
+  return (thra->priority > thrb->priority);
+}
+
+bool
+Compare_tick (const struct list_elem *Coma, const struct list_elem *Comb, void *aux UNUSED)
+{
+  struct thread *Threada = list_entry (Coma, struct thread, elem);
+  struct thread *Threadb = list_entry (Comb, struct thread, elem);
+  if ((Threada->tick) != (Threadb->tick)){
+    return ((Threada->tick) < (Threadb->tick));
+  }
+  else{
+    return ((Threada->priority) > (Threadb->priority));
+  }
+}
+
+bool
+Compare_thread (const struct list_elem *Coma, const struct list_elem *Comb, void *aux UNUSED){
+  struct thread *Threada = list_entry (Coma, struct thread, elem);
+  struct thread *Threadb = list_entry (Comb, struct thread, elem);
+  return ((Threada->priority) > (Threadb->priority));
+}
